@@ -1,0 +1,12 @@
+[package]
+name = "clar2wasm2"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+id-arena = "2.2.1"
+lazy_static = "1.4.0"
+sexp = "1.1.4"
+wabt = "0.10.0"
+walrus = "0.20.1"
+wasmtime = "12.0.1"
