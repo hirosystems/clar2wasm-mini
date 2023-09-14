@@ -1,35 +1,48 @@
 use std::error::Error;
 
+use regex;
 use sexp::{self, Atom, Sexp};
 use walrus::ir::BinaryOp;
 use walrus::{FunctionBuilder, InstrSeqBuilder, Module, ModuleConfig, ValType};
-use wasmtime::{Engine, Linker, Store, Val};
+use wasmtime::{Engine, Linker, Store};
+
+mod returnbuf;
+use returnbuf::*;
 
 pub struct Transpiled {
     module: wasmtime::Module,
     engine: Engine,
 }
 
-enum ClarityAtom {
+enum ClarAtom {
     Int(i64),
-    Uint(i64),
+    UInt(u64),
 }
 
-impl Emit for ClarityAtom {
+impl Emit for ClarAtom {
     fn emit(&self, builder: &mut InstrSeqBuilder) {
         match self {
-            ClarityAtom::Int(a) => {
+            ClarAtom::Int(a) => {
                 builder.i64_const(*a);
             }
-            _ => todo!(),
+            ClarAtom::UInt(a) => {
+                builder.i64_const(*a as i64);
+            }
         }
     }
 }
 
-impl ClarityAtom {
+impl ClarAtom {
     fn parse(atom: &Atom) -> Self {
         match atom {
-            Atom::I(n) => ClarityAtom::Int(*n as i64),
+            Atom::I(n) => ClarAtom::Int(*n as i64),
+            Atom::S(s) => {
+                if let Some(cap) = regex::Regex::new("u([0-9])$").unwrap().captures(s) {
+                    ClarAtom::UInt(u64::from_str_radix(&cap[1], 10).unwrap())
+                } else {
+                    todo!()
+                }
+            }
             _ => todo!(),
         }
     }
@@ -42,7 +55,7 @@ struct Parsed {
 }
 
 enum AST {
-    Atom(ClarityAtom),
+    Atom(ClarAtom),
     Procedure(Box<dyn Procedure>),
 }
 
@@ -103,7 +116,7 @@ impl Parsed {
     fn from_sexp(sexp: Sexp) -> Result<Self, Box<dyn Error>> {
         match sexp {
             Sexp::Atom(ref a) => Ok(Parsed {
-                ast: AST::Atom(ClarityAtom::parse(a)),
+                ast: AST::Atom(ClarAtom::parse(a)),
                 input: &[],
                 output: &[ValType::I64],
             }),
@@ -143,44 +156,6 @@ pub trait Emit {
     fn emit(&self, builder: &mut InstrSeqBuilder);
 }
 
-pub struct ReturnBuf([Val; 2]);
-
-impl ReturnBuf {
-    fn new() -> Self {
-        ReturnBuf([Val::I32(0), Val::I32(0)])
-    }
-}
-
-pub trait ReturnBufInterop {
-    fn from_buf(buf: &ReturnBuf) -> Self;
-    fn req_space(buf: &mut ReturnBuf) -> &mut [Val];
-}
-
-impl ReturnBufInterop for i128 {
-    fn from_buf(buf: &ReturnBuf) -> Self {
-        match &buf.0 {
-            &[Val::I64(lo), Val::I64(hi), ..] => lo as i128 + ((hi as i128) >> 64),
-            _ => todo!(),
-        }
-    }
-    fn req_space(buf: &mut ReturnBuf) -> &mut [Val] {
-        &mut buf.0[..2]
-    }
-}
-
-impl ReturnBufInterop for i64 {
-    fn from_buf(buf: &ReturnBuf) -> Self {
-        match &buf.0 {
-            &[Val::I64(i), ..] => i,
-            _ => todo!(),
-        }
-    }
-
-    fn req_space(buf: &mut ReturnBuf) -> &mut [Val] {
-        &mut buf.0[..1]
-    }
-}
-
 impl Transpiled {
     pub fn new(text: &str) -> Result<Self, Box<dyn Error>> {
         let parsed = Parsed::new(text)?;
@@ -216,17 +191,11 @@ impl Transpiled {
         let linker = Linker::new(&self.engine);
         let instance = linker.instantiate(&mut store, &self.module)?;
 
-        println!("a");
-
         let toplevel = instance.get_func(&mut store, ".toplevel").unwrap();
 
         let mut ret = ReturnBuf::new();
 
-        println!("b");
-
         toplevel.call(&mut store, &mut [], R::req_space(&mut ret))?;
-
-        println!("c");
 
         Ok(R::from_buf(&ret))
     }
@@ -238,9 +207,8 @@ mod tests {
 
     #[test]
     fn addition() -> Result<(), Box<dyn Error>> {
-        let transp = Transpiled::new("(+ 3 3)")?;
-
-        assert_eq!(transp.call_toplevel::<i64>()?, 6);
+        let transp = Transpiled::new("(+ 3 -2)")?;
+        assert_eq!(transp.call_toplevel::<i64>()?, 1);
 
         Ok(())
     }
@@ -248,8 +216,10 @@ mod tests {
     #[test]
     fn atom() -> Result<(), Box<dyn Error>> {
         let transp = Transpiled::new("-4")?;
-
         assert_eq!(transp.call_toplevel::<i64>()?, -4);
+
+        let transp = Transpiled::new("u4")?;
+        assert_eq!(transp.call_toplevel::<u64>()?, 4);
 
         Ok(())
     }
