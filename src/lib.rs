@@ -1,257 +1,199 @@
-// use std::error::Error;
-// use std::ops::Deref;
-
-// use regex;
-// use sexp::{self, Atom, Sexp};
-// use walrus::ir::BinaryOp;
-// use walrus::{FunctionBuilder, InstrSeqBuilder, Module, ModuleConfig, ValType};
-// use wasmtime::{Engine, Linker, Store};
-
-// mod returnbuf;
-
 mod arithmetic;
-mod cvm;
 mod words;
 
 #[cfg(test)]
 mod test_utils;
 
+use clarity::vm::ast::ContractAST;
+use clarity::vm::Value;
+use clarity::vm::{SymbolicExpression, SymbolicExpressionType};
+
 pub type CResult<T> = Result<T, Box<dyn std::error::Error>>;
 
-pub use cvm::*;
+#[derive(Debug, Default)]
+pub struct Stack(Vec<Value>);
 
-// use returnbuf::*;
+#[derive(Debug)]
+pub enum ValueType {
+    Int,
+    UInt,
+}
 
-// pub struct Transpiled {
-//     module: wasmtime::Module,
-//     engine: Engine,
-// }
+impl From<&Value> for ValueType {
+    fn from(value: &Value) -> Self {
+        match value {
+            Value::Int(_) => ValueType::Int,
+            Value::UInt(_) => ValueType::UInt,
+            _ => todo!(),
+        }
+    }
+}
 
-// enum ClarAtom {
-//     Int(i128),
-//     UInt(u128),
-// }
+#[derive(Debug)]
+pub enum Instruction {
+    Literal(Value),
+    Proc(&'static dyn Proc),
+}
 
-// impl ClarType {
-//     fn to_wasm_type(&self) -> &[ValType] {
-//         match self {
-//             ClarType::Int | ClarType::UInt => &[ValType::I64, ValType::I64],
-//         }
-//     }
-// }
+pub trait Proc: core::fmt::Debug {
+    fn execute(&self, stack: &mut Stack) -> CResult<()>;
+    fn output(&self) -> ValueType;
+}
 
-// impl Deref for ClarSign {
-//     type Target = [ValType];
-//     fn deref(&self) -> &Self::Target {
-//         &self.walrus
-//     }
-// }
+#[derive(Debug)]
+pub struct Program(Vec<Instruction>);
 
-// impl Emit for ClarAtom {
-//     fn emit(&self, builder: &mut InstrSeqBuilder) {
-//         match self {
-//             ClarAtom::Int(a) => {
-//                 builder.i64_const(*a as i64);
-//                 builder.i64_const((*a << 64) as i64);
-//             }
-//             ClarAtom::UInt(a) => {
-//                 builder.i64_const(*a as i64);
-//                 builder.i64_const((*a << 64) as i64);
-//             }
-//         }
-//     }
-// }
+pub struct ProgramBuilder {
+    instructions: Vec<Instruction>,
+    typestack: Vec<ValueType>,
+}
 
-// impl ClarAtom {
-//     fn parse(atom: &Atom) -> Self {
-//         match atom {
-//             Atom::I(n) => ClarAtom::Int(*n as i128),
-//             Atom::S(s) => {
-//                 if let Some(cap) = regex::Regex::new("u([0-9])$").unwrap().captures(s) {
-//                     ClarAtom::UInt(u128::from_str_radix(&cap[1], 10).unwrap())
-//                 } else {
-//                     todo!()
-//                 }
-//             }
-//             _ => todo!(),
-//         }
-//     }
-// }
+#[derive(Debug)]
+pub struct Execution<'a> {
+    program: &'a Program,
+    instruction_ptr: usize,
+    stack: Stack,
+}
 
-// struct Parsed {
-//     ast: AST,
-//     input: ClarSign,
-//     output: ClarSign,
-// }
+impl<'a> Execution<'a> {
+    fn eval(&mut self) -> CResult<Option<Value>> {
+        while let Some(inst) = self.program.0.get(self.instruction_ptr) {
+            match inst {
+                Instruction::Literal(lit) => self.stack.push(lit.clone()),
+                Instruction::Proc(p) => p.execute(&mut self.stack)?,
+            }
+            self.instruction_ptr += 1;
+        }
+        Ok(self.stack.0.pop())
+    }
+}
 
-// enum AST {
-//     Atom(ClarAtom),
-//     Procedure(Box<dyn Procedure>),
-// }
+impl Program {
+    pub fn eval(&mut self) -> CResult<Option<Value>> {
+        let mut exec = Execution {
+            program: self,
+            instruction_ptr: 0,
+            stack: Stack::default(),
+        };
+        exec.eval()
+    }
 
-// impl Emit for AST {
-//     fn emit(&self, builder: &mut InstrSeqBuilder) {
-//         match self {
-//             AST::Atom(a) => a.emit(builder),
-//             AST::Procedure(p) => p.emit(builder),
-//         }
-//     }
-// }
+    pub fn from_ast(ast: &ContractAST) -> CResult<Self> {
+        let mut builder = ProgramBuilder {
+            instructions: vec![],
+            typestack: vec![],
+        };
 
-// pub trait Procedure: Sync + Emit {
-//     fn input(&self) -> ClarSign;
-//     fn output(&self) -> ClarSign;
-// }
+        builder.ingest(&ast.expressions)?;
+        Ok(builder.build())
+    }
+}
 
-// struct Add(Vec<Parsed>);
+impl ProgramBuilder {
+    pub fn build(self) -> Program {
+        Program(self.instructions)
+    }
 
-// impl Procedure for Add {
-//     fn input(&self) -> ClarSign {
-//         // todo: make dynamic
-//         ClarSign::new(&[ClarType::Int, ClarType::Int])
-//     }
+    pub fn ingest(&mut self, expressions: &[SymbolicExpression]) -> CResult<()> {
+        for e in expressions {
+            match &e.expr {
+                SymbolicExpressionType::AtomValue(_a) => todo!("a"),
+                SymbolicExpressionType::List(list) => match &**list {
+                    [SymbolicExpression {
+                        expr: SymbolicExpressionType::Atom(ref a),
+                        ..
+                    }, args @ ..] => {
+                        let name = a.as_str();
 
-//     fn output(&self) -> ClarSign {
-//         ClarSign::new(&[ClarType::Int])
-//     }
-// }
+                        if let Some(word) = words::lookup(name) {
+                            let normalized = word.normalize(args);
+                            word.traverse(&normalized, self)?;
+                            word.emit(self)?;
+                        } else {
+                            panic!("unknown word {name}");
+                        }
+                    }
+                    e => todo!("unhandled case {e:?}"),
+                },
+                SymbolicExpressionType::LiteralValue(a) => {
+                    self.typestack.push(ValueType::from(a));
+                    self.instructions.push(Instruction::Literal(a.clone()));
+                }
+                e @ _ => todo!("z {e:?}"),
+            }
+        }
+        Ok(())
+    }
 
-// fn resolve_proc(mut body: Vec<Sexp>) -> Result<Box<dyn Procedure>, Box<dyn Error>> {
-//     let first = body.remove(0);
-//     let args = body;
-//     match first {
-//         Sexp::Atom(Atom::S(s)) => {
-//             if s == "+" {
-//                 let parsed: Result<Vec<Parsed>, _> =
-//                     args.into_iter().map(Parsed::from_sexp).collect();
-//                 Ok(Box::new(Add(parsed?)))
-//             } else {
-//                 todo!()
-//             }
-//         }
-//         _ => todo!(),
-//     }
-// }
+    pub fn peek_two(&self) -> CResult<(&ValueType, &ValueType)> {
+        let peek = &self.typestack[..2];
+        Ok((&peek[0], &peek[1]))
+    }
 
-// impl Parsed {
-//     fn from_sexp(sexp: Sexp) -> Result<Self, Box<dyn Error>> {
-//         match sexp {
-//             Sexp::Atom(ref a) => Ok(Parsed {
-//                 ast: AST::Atom(ClarAtom::parse(a)),
-//                 input: ClarSign::empty(),
-//                 output: ClarSign::new(&[ClarType::Int]),
-//             }),
-//             Sexp::List(list) => {
-//                 if list.is_empty() {
-//                     panic!("Invalid syntax")
-//                 };
-//                 let proc = resolve_proc(list)?;
+    pub fn consume_two(&mut self) -> CResult<(ValueType, ValueType)> {
+        let b = self.typestack.pop().unwrap();
+        let a = self.typestack.pop().unwrap();
+        Ok((a, b))
+    }
 
-//                 let input = proc.input();
-//                 let output = proc.output();
+    pub fn push_proc(&mut self, proc: &'static dyn Proc) {
+        self.typestack.push(proc.output());
+        self.instructions.push(Instruction::Proc(proc))
+    }
+}
 
-//                 Ok(Parsed {
-//                     ast: AST::Procedure(proc),
-//                     input,
-//                     output,
-//                 })
-//             }
-//         }
-//     }
+impl Stack {
+    pub fn consume_two(&mut self) -> CResult<(Value, Value)> {
+        let b = self.0.pop().unwrap();
+        let a = self.0.pop().unwrap();
+        Ok((a, b))
+    }
 
-//     fn new(text: &str) -> Result<Self, Box<dyn Error>> {
-//         Self::from_sexp(sexp::parse(text)?)
-//     }
-// }
+    pub fn push(&mut self, val: Value) {
+        self.0.push(val)
+    }
+}
 
-// impl Emit for Parsed {
-//     fn emit(&self, builder: &mut InstrSeqBuilder) {
-//         match &self.ast {
-//             AST::Atom(a) => a.emit(builder),
-//             AST::Procedure(a) => a.emit(builder),
-//         }
-//     }
-// }
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::test_utils::{eval_ast, parse_to_ast};
 
-// pub trait Emit {
-//     fn emit(&self, builder: &mut InstrSeqBuilder);
-// }
+    fn test_both(source: &str) -> CResult<()> {
+        let ast = parse_to_ast(source)?;
+        let mut prog = Program::from_ast(&ast)?;
 
-// impl Transpiled {
-//     pub fn new(text: &str) -> Result<Self, Box<dyn Error>> {
-//         let parsed = Parsed::new(text)?;
-//         let config = ModuleConfig::new();
-//         let mut module = Module::with_config(config);
+        println!("PROG\n{:?}", prog);
 
-//         // toplevel fn builder
-//         let mut builder = FunctionBuilder::new(&mut module.types, &[], &*parsed.output);
+        let a = eval_ast(&ast)?;
+        let b = prog.eval()?;
 
-//         parsed.emit(&mut builder.func_body());
+        assert_eq!(a, b);
+        Ok(())
+    }
 
-//         let toplevel = builder.finish(vec![], &mut module.funcs);
+    #[test]
+    fn test_trivial() -> CResult<()> {
+        test_both("2")
+    }
 
-//         module.exports.add(".toplevel", toplevel);
+    #[test]
+    fn test_simple() -> CResult<()> {
+        test_both("(+ 1 1)")
+    }
 
-//         let code = module.emit_wasm();
+    #[test]
+    fn test_nested() -> CResult<()> {
+        test_both("(+ (+ 1 2) (+ 3 4))")
+    }
 
-//         println!("{}", wabt::wasm2wat(&code)?);
+    #[test]
+    fn test_unsigned() -> CResult<()> {
+        test_both("(+ (+ u1 u2) (+ u3 u4))")
+    }
 
-//         let engine = Engine::default();
-//         let module = wasmtime::Module::new(&engine, code)?;
-
-//         Ok(Transpiled { module, engine })
-//     }
-
-//     pub fn call_toplevel<R>(&self) -> Result<R, Box<dyn Error>>
-//     where
-//         R: ReturnBufInterop,
-//     {
-//         let mut store = Store::new(&self.engine, ());
-//         let linker = Linker::new(&self.engine);
-//         let instance = linker.instantiate(&mut store, &self.module)?;
-
-//         let toplevel = instance.get_func(&mut store, ".toplevel").unwrap();
-
-//         let mut ret = ReturnBuf::new();
-
-//         toplevel.call(&mut store, &mut [], R::req_space(&mut ret))?;
-
-//         Ok(R::from_buf(&ret))
-//     }
-// }
-
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-
-//     #[test]
-//     fn addition() -> Result<(), Box<dyn Error>> {
-//         let transp = Transpiled::new("(+ 3 -2)")?;
-//         assert_eq!(transp.call_toplevel::<i64>()?, 1);
-
-//         Ok(())
-//     }
-
-//     #[test]
-//     #[ignore]
-//     fn nested_addition() -> Result<(), Box<dyn Error>> {
-//         let transp = Transpiled::new("(+ (+ 3 3) 3)")?;
-//         assert_eq!(transp.call_toplevel::<i64>()?, 9);
-
-//         Ok(())
-//     }
-
-//     #[test]
-//     fn atom() -> Result<(), Box<dyn Error>> {
-//         let transp = Transpiled::new("4")?;
-//         assert_eq!(transp.call_toplevel::<i128>()?, 4);
-
-//         let transp = Transpiled::new("-4")?;
-//         assert_eq!(transp.call_toplevel::<i128>()?, -4);
-
-//         let transp = Transpiled::new("u4")?;
-//         assert_eq!(transp.call_toplevel::<u128>()?, 4);
-
-//         Ok(())
-//     }
-// }
+    #[test]
+    fn test_multivalue() -> CResult<()> {
+        test_both("(+ 1 2 3)")
+    }
+}

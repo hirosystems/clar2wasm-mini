@@ -1,9 +1,9 @@
 use clarity::vm::{ClarityName, SymbolicExpression, Value};
 use linkme::distributed_slice;
 
-use crate::cvm::{Proc, ProgramBuilder, Stack, ValueType};
-use crate::words::Word;
+use crate::words::{normalize_multiple_args, Word};
 use crate::CResult;
+use crate::{Proc, ProgramBuilder, Stack, ValueType};
 
 #[derive(Debug)]
 struct Add;
@@ -17,19 +17,7 @@ impl Word for Add {
     }
 
     fn normalize(&self, args: &[SymbolicExpression]) -> Vec<SymbolicExpression> {
-        // Converts from (+ 1 2 3 4) to (+ 1 (+ 2 (+ 3 4)))
-        let mut args = args.to_vec();
-        while args.len() > 2 {
-            let mut tail = args.split_off(args.len() - 2);
-            let b = tail.pop().unwrap();
-            let a = tail.pop().unwrap();
-            args.push(SymbolicExpression::list(Box::new([
-                SymbolicExpression::atom(self.name()),
-                a,
-                b,
-            ])))
-        }
-        args
+        normalize_multiple_args(self, args)
     }
 
     fn emit(&self, builder: &mut ProgramBuilder) -> CResult<()> {

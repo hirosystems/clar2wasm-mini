@@ -3,8 +3,8 @@ use lazy_static::lazy_static;
 use linkme::distributed_slice;
 use std::collections::HashMap;
 
-use crate::cvm::ProgramBuilder;
 use crate::CResult;
+use crate::ProgramBuilder;
 
 pub trait Word: Sync + core::fmt::Debug {
     fn name(&self) -> ClarityName;
@@ -38,4 +38,23 @@ lazy_static! {
 
 pub fn lookup(name: &str) -> Option<&'static dyn Word> {
     WORDS_BY_NAME.get(name).copied()
+}
+
+pub fn normalize_multiple_args<W: Word>(
+    w: &W,
+    args: &[SymbolicExpression],
+) -> Vec<SymbolicExpression> {
+    // Converts from (+ 1 2 3 4) to (+ 1 (+ 2 (+ 3 4)))
+    let mut args = args.to_vec();
+    while args.len() > 2 {
+        let mut tail = args.split_off(args.len() - 2);
+        let b = tail.pop().unwrap();
+        let a = tail.pop().unwrap();
+        args.push(SymbolicExpression::list(Box::new([
+            SymbolicExpression::atom(w.name()),
+            a,
+            b,
+        ])))
+    }
+    args
 }
