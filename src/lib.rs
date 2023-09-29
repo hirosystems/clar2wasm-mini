@@ -163,8 +163,6 @@ mod test {
         let ast = parse_to_ast(source)?;
         let mut prog = Program::from_ast(&ast)?;
 
-        println!("PROG\n{:?}", prog);
-
         let a = eval_ast(&ast)?;
         let b = prog.eval()?;
 
@@ -184,7 +182,7 @@ mod test {
 
     #[test]
     fn test_nested() -> CResult<()> {
-        test_both("(+ (+ 1 2) (+ 3 4))")
+        test_both("(+ (+ 1 2) (* 3 4))")
     }
 
     #[test]
